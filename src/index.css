@@ -1,0 +1,45 @@
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+#root {
+  height: 100%;
+}
+
+button {
+  cursor: pointer;
+  background: #f0f0f0;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 5px 10px;
+}
+
+button:hover {
+  background: #e0e0e0;
+}
+
+button:active {
+  background: #d0d0d0;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+code {
+  background: #f0f0f0;
+  padding: 2px 4px;
+  border-radius: 2px;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+}
+
+pre {
+  overflow-x: auto;
+}

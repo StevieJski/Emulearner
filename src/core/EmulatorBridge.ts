@@ -1,0 +1,502 @@
+import type { EmulatorJS, GameManager, EmscriptenModule } from '../types/emulatorjs';
+
+export interface EmulatorBridgeConfig {
+  containerId: string;
+  gameUrl: string;
+  core: string;
+  dataPath?: string;
+  biosUrl?: string;
+  startOnLoad?: boolean;
+  debug?: boolean;
+  volume?: number;
+}
+
+export type EmulatorState = 'uninitialized' | 'loading' | 'ready' | 'running' | 'paused' | 'error';
+
+// Track global state to prevent double-loading
+let loaderScriptLoaded = false;
+let currentLoadingPromise: Promise<void> | null = null;
+
+/**
+ * EmulatorBridge provides a TypeScript interface to EmulatorJS.
+ * It handles lifecycle management, script loading, and provides typed access
+ * to the underlying GameManager methods.
+ */
+export class EmulatorBridge {
+  private config: EmulatorBridgeConfig;
+  private emulator: EmulatorJS | null = null;
+  private _state: EmulatorState = 'uninitialized';
+  private loadPromise: Promise<void> | null = null;
+
+  constructor(config: EmulatorBridgeConfig) {
+    this.config = {
+      dataPath: 'data/',
+      startOnLoad: true,
+      debug: false,
+      volume: 0.5,
+      ...config,
+    };
+  }
+
+  get state(): EmulatorState {
+    return this._state;
+  }
+
+  get gameManager(): GameManager | null {
+    return this.emulator?.gameManager ?? null;
+  }
+
+  get module(): EmscriptenModule | null {
+    // Access Module through gameManager (same as netplay code does)
+    return this.emulator?.gameManager?.Module ?? this.emulator?.Module ?? null;
+  }
+
+  get isReady(): boolean {
+    return this._state === 'ready' || this._state === 'running' || this._state === 'paused';
+  }
+
+  /**
+   * Initialize and load EmulatorJS with the configured settings.
+   * Returns a promise that resolves when the emulator is ready.
+   */
+  async load(): Promise<void> {
+    if (this.loadPromise) {
+      return this.loadPromise;
+    }
+
+    // If there's already a loading in progress globally, wait for it
+    if (currentLoadingPromise) {
+      await currentLoadingPromise;
+      // After waiting, check if emulator is ready
+      if (window.EJS_emulator) {
+        this.emulator = window.EJS_emulator;
+        this._state = 'ready';
+        return;
+      }
+    }
+
+    this._state = 'loading';
+
+    this.loadPromise = this.doLoad();
+    currentLoadingPromise = this.loadPromise;
+
+    try {
+      await this.loadPromise;
+    } finally {
+      currentLoadingPromise = null;
+    }
+
+    return this.loadPromise;
+  }
+
+  private async doLoad(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      // Verify container exists
+      const container = document.getElementById(this.config.containerId);
+      if (!container) {
+        this._state = 'error';
+        reject(new Error(`Container element #${this.config.containerId} not found`));
+        return;
+      }
+
+      // Set up global config variables that EmulatorJS expects
+      this.setupGlobalConfig();
+
+      // Set up the ready callback
+      window.EJS_onGameStart = () => {
+        this._state = 'ready';
+        this.emulator = window.EJS_emulator ?? null;
+        resolve();
+      };
+
+      // If loader is already loaded, we need to manually trigger EmulatorJS
+      if (loaderScriptLoaded) {
+        // EmulatorJS scripts are already loaded, create new instance
+        // The loader.js checks for EJS_player and creates EmulatorJS automatically
+        // We need to reload the page or find another way
+        // For now, reject with an error explaining the limitation
+        this._state = 'error';
+        reject(new Error('EmulatorJS already loaded. Please refresh the page to load a different game.'));
+        return;
+      }
+
+      // Load the EmulatorJS loader script
+      loaderScriptLoaded = true;
+      this.loadScript(`${this.config.dataPath}loader.js`)
+        .catch((error) => {
+          loaderScriptLoaded = false;
+          this._state = 'error';
+          reject(error);
+        });
+    });
+  }
+
+  private setupGlobalConfig(): void {
+    // EJS_player is used as a CSS selector, so add # for ID
+    window.EJS_player = `#${this.config.containerId}`;
+    window.EJS_gameUrl = this.config.gameUrl;
+    window.EJS_core = this.config.core;
+    window.EJS_pathtodata = this.config.dataPath;
+    window.EJS_startOnLoaded = this.config.startOnLoad;
+    window.EJS_DEBUG_XX = this.config.debug;
+    window.EJS_volume = this.config.volume;
+
+    if (this.config.biosUrl) {
+      window.EJS_biosUrl = this.config.biosUrl;
+    }
+  }
+
+  private loadScript(src: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // Check if script already exists
+      const existing = document.querySelector(`script[src="${src}"]`);
+      if (existing) {
+        resolve();
+        return;
+      }
+
+      const script = document.createElement('script');
+      script.src = src;
+      script.async = true;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
+      document.body.appendChild(script);
+    });
+  }
+
+  /**
+   * Resume the emulator main loop (unpause).
+   */
+  play(): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.toggleMainLoop(1);
+    this._state = 'running';
+  }
+
+  /**
+   * Pause the emulator main loop.
+   */
+  pause(): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.toggleMainLoop(0);
+    this._state = 'paused';
+  }
+
+  /**
+   * Toggle between play and pause states.
+   */
+  togglePause(): void {
+    if (this._state === 'running') {
+      this.pause();
+    } else if (this._state === 'paused' || this._state === 'ready') {
+      this.play();
+    }
+  }
+
+  /**
+   * Advance the emulator by exactly one frame.
+   * Uses requestAnimationFrame polling to detect frame advancement.
+   */
+  async stepFrame(): Promise<number> {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+
+    return new Promise<number>((resolve) => {
+      const gm = this.gameManager!;
+      const startFrame = gm.getFrameNum();
+
+      const checkFrame = () => {
+        const currentFrame = gm.getFrameNum();
+        if (currentFrame > startFrame) {
+          gm.toggleMainLoop(0); // Pause
+          this._state = 'paused';
+          resolve(currentFrame);
+        } else {
+          requestAnimationFrame(checkFrame);
+        }
+      };
+
+      gm.toggleMainLoop(1); // Resume loop
+      this._state = 'running';
+      requestAnimationFrame(checkFrame);
+    });
+  }
+
+  /**
+   * Advance the emulator by a specified number of frames.
+   */
+  async stepFrames(count: number): Promise<number> {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+
+    if (count <= 0) {
+      return this.getFrameNumber();
+    }
+
+    return new Promise<number>((resolve) => {
+      const gm = this.gameManager!;
+      const targetFrame = gm.getFrameNum() + count;
+
+      const checkFrame = () => {
+        const currentFrame = gm.getFrameNum();
+        if (currentFrame >= targetFrame) {
+          gm.toggleMainLoop(0); // Pause
+          this._state = 'paused';
+          resolve(currentFrame);
+        } else {
+          requestAnimationFrame(checkFrame);
+        }
+      };
+
+      gm.toggleMainLoop(1); // Resume loop
+      this._state = 'running';
+      requestAnimationFrame(checkFrame);
+    });
+  }
+
+  /**
+   * Get the current frame number.
+   */
+  getFrameNumber(): number {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    return this.gameManager.getFrameNum();
+  }
+
+  /**
+   * Simulate a button press/release.
+   * @param player - Player number (0-3)
+   * @param buttonIndex - Button index (see BUTTON_MAP)
+   * @param pressed - true for press, false for release
+   */
+  simulateInput(player: number, buttonIndex: number, pressed: boolean): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.simulateInput(player, buttonIndex, pressed ? 1 : 0);
+  }
+
+  /**
+   * Get a save state snapshot.
+   */
+  saveState(): Uint8Array {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    return this.gameManager.getState();
+  }
+
+  /**
+   * Load a save state snapshot.
+   */
+  loadState(state: Uint8Array): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.loadState(state);
+  }
+
+  /**
+   * Take a screenshot.
+   */
+  async screenshot(): Promise<Uint8Array> {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    return this.gameManager.screenshot();
+  }
+
+  /**
+   * Read a byte from emulator memory.
+   * @param address - Memory address (with console-specific offset)
+   */
+  readMemoryByte(address: number): number {
+    if (!this.module) {
+      throw new Error('Emulator not ready');
+    }
+    return this.module.HEAPU8[address];
+  }
+
+  /**
+   * Read a signed byte from emulator memory.
+   */
+  readMemoryInt8(address: number): number {
+    if (!this.module) {
+      throw new Error('Emulator not ready');
+    }
+    return this.module.HEAP8[address];
+  }
+
+  /**
+   * Read an unsigned 16-bit value from emulator memory.
+   * @param address - Memory address (must be 2-byte aligned)
+   */
+  readMemoryUint16(address: number): number {
+    if (!this.module) {
+      throw new Error('Emulator not ready');
+    }
+    return this.module.HEAPU16[address >> 1];
+  }
+
+  /**
+   * Read a signed 16-bit value from emulator memory.
+   */
+  readMemoryInt16(address: number): number {
+    if (!this.module) {
+      throw new Error('Emulator not ready');
+    }
+    return this.module.HEAP16[address >> 1];
+  }
+
+  /**
+   * Read an unsigned 32-bit value from emulator memory.
+   * @param address - Memory address (must be 4-byte aligned)
+   */
+  readMemoryUint32(address: number): number {
+    if (!this.module) {
+      throw new Error('Emulator not ready');
+    }
+    return this.module.HEAPU32[address >> 2];
+  }
+
+  /**
+   * Read a signed 32-bit value from emulator memory.
+   */
+  readMemoryInt32(address: number): number {
+    if (!this.module) {
+      throw new Error('Emulator not ready');
+    }
+    return this.module.HEAP32[address >> 2];
+  }
+
+  /**
+   * Read raw bytes from emulator memory.
+   */
+  readMemoryBytes(address: number, length: number): Uint8Array {
+    if (!this.module) {
+      throw new Error('Emulator not ready');
+    }
+    return this.module.HEAPU8.slice(address, address + length);
+  }
+
+  /**
+   * Get core options as a JSON string.
+   */
+  getCoreOptions(): string {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    return this.gameManager.getCoreOptions();
+  }
+
+  /**
+   * Set a core option.
+   */
+  setVariable(option: string, value: string): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.setVariable(option, value);
+  }
+
+  /**
+   * Enable/disable fast forward mode.
+   */
+  setFastForward(enabled: boolean): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.toggleFastForward(enabled ? 1 : 0);
+  }
+
+  /**
+   * Set fast forward speed ratio.
+   */
+  setFastForwardRatio(ratio: number): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.setFastForwardRatio(ratio);
+  }
+
+  /**
+   * Enable/disable slow motion mode.
+   */
+  setSlowMotion(enabled: boolean): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.toggleSlowMotion(enabled ? 1 : 0);
+  }
+
+  /**
+   * Set slow motion speed ratio.
+   */
+  setSlowMotionRatio(ratio: number): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.setSlowMotionRatio(ratio);
+  }
+
+  /**
+   * Restart the game.
+   */
+  restart(): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.restart();
+  }
+
+  /**
+   * Check if save states are supported for the current core.
+   */
+  supportsStates(): boolean {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    return this.gameManager.supportsStates();
+  }
+
+  /**
+   * Get video dimensions.
+   */
+  getVideoDimensions(): { width: number; height: number } | null {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    const width = this.gameManager.getVideoDimensions('width');
+    const height = this.gameManager.getVideoDimensions('height');
+    if (width === undefined || height === undefined) {
+      return null;
+    }
+    return { width, height };
+  }
+
+  /**
+   * Clean up and destroy the emulator instance.
+   */
+  destroy(): void {
+    // Clear global config
+    window.EJS_emulator = undefined;
+    window.EJS_gameUrl = undefined;
+    window.EJS_core = undefined;
+    window.EJS_player = undefined;
+    window.EJS_pathtodata = undefined;
+    window.EJS_startOnLoaded = undefined;
+    window.EJS_DEBUG_XX = undefined;
+    window.EJS_onGameStart = undefined;
+
+    this.emulator = null;
+    this._state = 'uninitialized';
+    this.loadPromise = null;
+  }
+}
