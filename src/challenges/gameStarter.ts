@@ -2,7 +2,8 @@
  * Game Starter - Automatically navigate through game menus
  *
  * Provides automated sequences to get from title screen to gameplay
- * for different games.
+ * for different games. Uses memory-mapped game_mode variable to verify
+ * actual game state instead of blind frame stepping.
  */
 
 import { GameController } from '../core/GameController';
@@ -17,58 +18,163 @@ export interface StartResult {
 }
 
 /**
- * Check if Sonic 2 is at the title screen or in gameplay
- *
- * NOTE: The stable-retro memory addresses don't match EmulatorJS's memory layout.
- * For now, we just return true if the emulator is ready - user must manually
- * start the game before running challenges.
+ * Sonic 2 game_mode values (68000 address 0xFFF600)
+ */
+const SONIC2_MODE = {
+  SEGA_LOGO: 0x00,
+  TITLE: 0x04,
+  DEMO: 0x08,
+  GAMEPLAY: 0x0C,
+  SPECIAL_STAGE: 0x8C,
+} as const;
+
+/**
+ * Read the game_mode variable from RAM.
+ * Returns -1 if memory hasn't been discovered yet or the read fails.
+ */
+function readGameMode(controller: GameController): number {
+  try {
+    return controller.getVariable('game_mode');
+  } catch {
+    return -1;
+  }
+}
+
+/**
+ * Check if Sonic 2 is in active gameplay by reading game_mode from RAM.
  */
 export function isSonic2InGameplay(controller: GameController, _debug = false): boolean {
-  // Just check if the emulator/controller is ready
-  // Memory address detection is not working with EmulatorJS memory layout
-  return controller.isReady;
+  if (!controller.isReady) return false;
+
+  const mode = readGameMode(controller);
+  if (_debug) {
+    console.log(`[gameStarter] game_mode=0x${mode >= 0 ? mode.toString(16).toUpperCase() : '??'}`);
+  }
+
+  // Memory not discovered yet — not ready
+  if (mode < 0) return false;
+
+  return mode === SONIC2_MODE.GAMEPLAY || mode === SONIC2_MODE.SPECIAL_STAGE;
+}
+
+/**
+ * Wait up to maxFrames for game_mode to change away from the given mode.
+ * Steps in chunks for efficiency.
+ */
+async function waitForModeChange(
+  controller: GameController,
+  fromMode: number,
+  maxFrames: number,
+  chunkSize = 30,
+): Promise<number> {
+  let stepped = 0;
+  while (stepped < maxFrames) {
+    await controller.stepFrames(chunkSize);
+    stepped += chunkSize;
+    const mode = readGameMode(controller);
+    if (mode >= 0 && mode !== fromMode) return mode;
+  }
+  return readGameMode(controller);
+}
+
+/**
+ * Wait up to maxFrames for game_mode to reach a target mode.
+ */
+async function waitForMode(
+  controller: GameController,
+  targetMode: number,
+  maxFrames: number,
+  chunkSize = 30,
+): Promise<boolean> {
+  let stepped = 0;
+  while (stepped < maxFrames) {
+    const mode = readGameMode(controller);
+    if (mode === targetMode) return true;
+    await controller.stepFrames(chunkSize);
+    stepped += chunkSize;
+  }
+  return readGameMode(controller) === targetMode;
 }
 
 /**
  * Automated start sequence for Sonic The Hedgehog 2
  *
- * This sequence navigates from the SEGA logo through to gameplay:
- * 1. Wait for title screen
- * 2. Press Start
- * 3. Press Start/A on menu
- * 4. Wait for level to load
+ * Uses memory-mapped game_mode to verify each transition:
+ * 1. Discover RAM layout
+ * 2. Skip SEGA logo (wait for mode change)
+ * 3. Press Start at title, then Start again for 1P mode
+ * 4. Verify gameplay mode is reached
  */
 export async function startSonic2(
   controller: GameController,
   onProgress?: (message: string) => void
 ): Promise<StartResult> {
   try {
-    onProgress?.('Waiting for SEGA logo...');
+    // Step 1: Load game data and discover memory
+    onProgress?.('Discovering memory layout...');
+    controller.loadGameData('SonicTheHedgehog2-Genesis');
 
-    // Wait for SEGA logo (about 3 seconds at 60fps)
-    await controller.stepFrames(180);
+    try {
+      await controller.discoverMemory('genesis');
+    } catch (e) {
+      return { success: false, message: `Memory discovery failed: ${e}` };
+    }
 
-    onProgress?.('Pressing Start at title...');
+    // Step 2: Check if already in gameplay
+    const currentMode = readGameMode(controller);
+    if (currentMode === SONIC2_MODE.GAMEPLAY || currentMode === SONIC2_MODE.SPECIAL_STAGE) {
+      onProgress?.('Game already running!');
+      return { success: true, message: 'Game already in gameplay.' };
+    }
 
-    // Press Start to get past title screen
-    await controller.tap('start');
-    await controller.stepFrames(60);
+    // Step 3: Wait through SEGA logo
+    if (currentMode === SONIC2_MODE.SEGA_LOGO) {
+      onProgress?.('Waiting for SEGA logo...');
+      const newMode = await waitForModeChange(controller, SONIC2_MODE.SEGA_LOGO, 360);
+      if (newMode === SONIC2_MODE.GAMEPLAY) {
+        onProgress?.('Game started!');
+        return { success: true, message: 'Game started!' };
+      }
+    }
 
-    onProgress?.('Selecting 1 Player...');
+    // Step 4: Retry loop — press Start to navigate menus
+    for (let attempt = 0; attempt < 3; attempt++) {
+      onProgress?.(`Pressing Start (attempt ${attempt + 1}/3)...`);
 
-    // Press Start for 1 Player mode
-    await controller.tap('start');
-    await controller.stepFrames(30);
+      // Press Start to get past title / select 1P
+      await controller.tap('start');
+      await controller.stepFrames(60);
 
-    onProgress?.('Waiting for level to load...');
+      // Press Start again for 1P mode selection
+      await controller.tap('start');
 
-    // Wait for level to fully load (about 3 seconds)
-    await controller.stepFrames(180);
+      onProgress?.('Waiting for level to load...');
+      const reachedGameplay = await waitForMode(
+        controller,
+        SONIC2_MODE.GAMEPLAY,
+        240,
+      );
 
-    onProgress?.('Game started!');
+      if (reachedGameplay) {
+        onProgress?.('Game started!');
+        return { success: true, message: 'Game started! You can now run challenges.' };
+      }
+
+      // If we ended up back at SEGA logo or title, keep trying
+      const mode = readGameMode(controller);
+      console.log(`[gameStarter] Attempt ${attempt + 1} ended at mode 0x${mode.toString(16)}`);
+    }
+
+    // Final check
+    const finalMode = readGameMode(controller);
+    if (finalMode === SONIC2_MODE.GAMEPLAY || finalMode === SONIC2_MODE.SPECIAL_STAGE) {
+      onProgress?.('Game started!');
+      return { success: true, message: 'Game started!' };
+    }
+
     return {
-      success: true,
-      message: 'Game started! You can now run challenges.',
+      success: false,
+      message: `Could not reach gameplay. game_mode=0x${finalMode.toString(16).toUpperCase()}`,
     };
   } catch (error) {
     return {

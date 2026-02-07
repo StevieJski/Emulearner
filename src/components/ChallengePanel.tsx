@@ -2,7 +2,7 @@
  * ChallengePanel - Main UI for selecting and running challenges
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { CodeEditor } from './CodeEditor';
 import { ResultDisplay } from './ResultDisplay';
 import { GameController } from '../core/GameController';
@@ -67,16 +67,17 @@ export function ChallengePanel({
     }
   }, [controller]);
 
-  // Check game readiness periodically
-  useEffect(() => {
-    console.log('[ChallengePanel] Game ready check effect:', {
-      hasController: !!controller,
-      controllerReady: controller?.isReady,
-      hasChallenge: !!currentChallenge,
-    });
+  // Track whether auto-start has been attempted for this challenge
+  const autoStartAttempted = useRef(false);
 
+  // Reset auto-start flag when challenge changes
+  useEffect(() => {
+    autoStartAttempted.current = false;
+  }, [selectedId]);
+
+  // Check game readiness periodically (stops polling once ready)
+  useEffect(() => {
     if (!controller || !currentChallenge) {
-      console.log('[ChallengePanel] Missing controller or challenge, setting gameReady=false');
       setGameReady(false);
       return;
     }
@@ -84,30 +85,30 @@ export function ChallengePanel({
     // Load game data for the current challenge
     try {
       controller.loadGameData(currentChallenge.game);
-      console.log('[ChallengePanel] Loaded game data for:', currentChallenge.game);
     } catch (e) {
       console.log('[ChallengePanel] Failed to load game data:', e);
     }
 
-    let checkCount = 0;
     const checkReady = () => {
       try {
-        // Log debug info every 5th check
-        const debug = checkCount % 5 === 0;
-        const ready = isGameReady(currentChallenge.game, controller, debug);
-        if (debug) {
-          console.log('[ChallengePanel] Game ready check:', ready, 'controller.isReady:', controller.isReady);
-        }
+        const ready = isGameReady(currentChallenge.game, controller);
         setGameReady(ready);
-        checkCount++;
+        return ready;
       } catch (e) {
         console.error('[ChallengePanel] Error checking game ready:', e);
         setGameReady(false);
+        return false;
       }
     };
 
-    checkReady();
-    const interval = setInterval(checkReady, 1000);
+    // Initial check
+    if (checkReady()) return; // Already ready, no need to poll
+
+    const interval = setInterval(() => {
+      if (checkReady()) {
+        clearInterval(interval);
+      }
+    }, 2000);
     return () => clearInterval(interval);
   }, [controller, currentChallenge]);
 
@@ -145,9 +146,6 @@ export function ChallengePanel({
     setStartProgress('Starting...');
 
     try {
-      // Load game data first
-      controller.loadGameData(currentChallenge.game);
-
       const result = await startGame(
         currentChallenge.game,
         controller,
@@ -166,6 +164,19 @@ export function ChallengePanel({
       setStartingGame(false);
     }
   }, [controller, currentChallenge]);
+
+  // Auto-start: trigger game start when controller + challenge are available
+  useEffect(() => {
+    if (!controller || !currentChallenge || gameReady || startingGame) return;
+    if (autoStartAttempted.current) return;
+    if (!controller.isReady) return;
+
+    autoStartAttempted.current = true;
+    const timer = setTimeout(() => {
+      handleStartGame();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [controller, currentChallenge, gameReady, startingGame, handleStartGame]);
 
   const handleRun = useCallback(async () => {
     if (!engine || !currentChallenge || !controller) {
@@ -324,31 +335,36 @@ export function ChallengePanel({
             border: '1px solid #ff9800',
           }}
         >
-          <strong style={{ color: '#e65100' }}>Game Not Ready</strong>
-          <p style={{ margin: '10px 0 15px', fontSize: '14px' }}>
-            The game needs to be started before running challenges.
-            Click the button below to automatically navigate through the menus,
-            or start the game manually.
-          </p>
-          <button
-            onClick={handleStartGame}
-            disabled={startingGame}
-            style={{
-              padding: '10px 20px',
-              fontSize: '14px',
-              backgroundColor: '#ff9800',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: startingGame ? 'not-allowed' : 'pointer',
-            }}
-          >
-            {startingGame ? 'Starting...' : 'Start Game Automatically'}
-          </button>
-          {startProgress && (
-            <p style={{ margin: '10px 0 0', fontSize: '12px', color: '#666' }}>
+          <strong style={{ color: '#e65100' }}>
+            {startingGame ? 'Starting Game...' : 'Game Not Ready'}
+          </strong>
+          {startingGame && startProgress ? (
+            <p style={{ margin: '10px 0 0', fontSize: '14px', color: '#666' }}>
               {startProgress}
             </p>
+          ) : (
+            <>
+              <p style={{ margin: '10px 0 15px', fontSize: '14px' }}>
+                The game needs to be started before running challenges.
+                Click the button below to automatically navigate through the menus,
+                or start the game manually.
+              </p>
+              <button
+                onClick={handleStartGame}
+                disabled={startingGame}
+                style={{
+                  padding: '10px 20px',
+                  fontSize: '14px',
+                  backgroundColor: '#ff9800',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '4px',
+                  cursor: startingGame ? 'not-allowed' : 'pointer',
+                }}
+              >
+                Start Game Automatically
+              </button>
+            </>
           )}
         </div>
       )}

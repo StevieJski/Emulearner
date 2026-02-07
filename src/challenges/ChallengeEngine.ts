@@ -93,14 +93,17 @@ export class ChallengeEngine {
         await this.controller.step();
       }
 
-      // Discover RAM base address for memory reads
-      // This uses the cheat system to locate work RAM in HEAPU8
-      try {
-        await this.controller.discoverMemory('genesis');
-        console.log('[ChallengeEngine] Memory discovery successful');
-      } catch (e) {
-        console.warn('[ChallengeEngine] Memory discovery failed:', e);
-        // Continue anyway - challenges may still work without memory reads
+      // Discover RAM base address for memory reads (skip if already discovered)
+      if (!this.controller.isMemoryDiscovered) {
+        try {
+          await this.controller.discoverMemory('genesis');
+          console.log('[ChallengeEngine] Memory discovery successful');
+        } catch (e) {
+          console.warn('[ChallengeEngine] Memory discovery failed:', e);
+          // Continue anyway - challenges may still work without memory reads
+        }
+      } else {
+        console.log('[ChallengeEngine] Memory already discovered, skipping');
       }
 
       // Note: Don't pause here - stepFrame handles pause/resume internally

@@ -349,6 +349,13 @@ export class GameController {
   }
 
   /**
+   * Whether memory discovery has been performed (memoryOffset is non-zero).
+   */
+  get isMemoryDiscovered(): boolean {
+    return this.memoryReader.memoryOffset !== 0;
+  }
+
+  /**
    * Read a named variable from game memory using Stable Retro mappings.
    * Requires loadGameData() to be called first.
    *
