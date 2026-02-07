@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import { EmulatorCanvas } from './EmulatorCanvas';
+import { ChallengePanel } from './ChallengePanel';
 import { GameController, Button } from '../core/GameController';
 import { EmulatorState } from '../core/EmulatorBridge';
 
@@ -11,6 +12,8 @@ const PRESET_ROMS = [
   { name: 'Airstriker (Genesis)', url: 'roms/airstriker.md', core: 'genesis_plus_gx' },
 ];
 
+type AppMode = 'sandbox' | 'challenges';
+
 export function App() {
   const [gameUrl, setGameUrl] = useState<string>('');
   const [core, setCore] = useState<string>('genesis_plus_gx');
@@ -18,15 +21,18 @@ export function App() {
   const [state, setState] = useState<EmulatorState>('uninitialized');
   const [frameNumber, setFrameNumber] = useState<number>(0);
   const [started, setStarted] = useState(false);
+  const [mode, setMode] = useState<AppMode>('challenges');
+  const [controller, setController] = useState<GameController | null>(null);
   const controllerRef = useRef<GameController | null>(null);
 
-  const handleReady = useCallback((controller: GameController) => {
-    controllerRef.current = controller;
-    controller.setRamOffset('genesis');
+  const handleReady = useCallback((newController: GameController) => {
+    controllerRef.current = newController;
+    setController(newController); // This triggers re-render for ChallengePanel
+    newController.setRamOffset('genesis');
     console.log('Emulator ready! GameController available.');
 
     // Expose controller globally for debugging
-    (window as unknown as { game: GameController }).game = controller;
+    (window as unknown as { game: GameController }).game = newController;
   }, []);
 
   const handleStateChange = useCallback((newState: EmulatorState) => {
@@ -93,10 +99,15 @@ export function App() {
     }
   };
 
+  const handleChallengeStart = useCallback(() => {
+    // Pause the emulator when a challenge starts
+    controllerRef.current?.pause();
+  }, []);
+
   return (
     <div style={{ padding: '20px', fontFamily: 'system-ui, sans-serif' }}>
       <h1>Emulearner</h1>
-      <p>TypeScript/React wrapper for EmulatorJS</p>
+      <p>Learn TypeScript through retro games</p>
 
       {!started ? (
         <div style={{ marginBottom: '20px' }}>
@@ -158,13 +169,44 @@ export function App() {
         </div>
       ) : (
         <>
+          {/* Mode Toggle */}
+          <div style={{ marginBottom: '15px' }}>
+            <button
+              onClick={() => setMode('challenges')}
+              style={{
+                padding: '8px 16px',
+                marginRight: '10px',
+                backgroundColor: mode === 'challenges' ? '#2196f3' : '#ddd',
+                color: mode === 'challenges' ? 'white' : '#333',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+              }}
+            >
+              Challenges
+            </button>
+            <button
+              onClick={() => setMode('sandbox')}
+              style={{
+                padding: '8px 16px',
+                backgroundColor: mode === 'sandbox' ? '#2196f3' : '#ddd',
+                color: mode === 'sandbox' ? 'white' : '#333',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+              }}
+            >
+              Sandbox
+            </button>
+          </div>
+
           <div style={{ marginBottom: '10px' }}>
             <span>State: <strong>{state}</strong></span>
             <span style={{ marginLeft: '20px' }}>Frame: <strong>{frameNumber}</strong></span>
           </div>
 
           <div style={{ display: 'flex', gap: '20px' }}>
-            <div style={{ flex: '1', maxWidth: '800px' }}>
+            <div style={{ flex: '1', maxWidth: '640px' }}>
               <EmulatorCanvas
                 gameUrl={gameUrl}
                 core={core}
@@ -176,48 +218,57 @@ export function App() {
               />
             </div>
 
-            <div style={{ width: '200px' }}>
-              <h3>Frame Control</h3>
-              <div style={{ display: 'flex', gap: '5px', marginBottom: '10px' }}>
-                <button onClick={handlePlay}>Play</button>
-                <button onClick={handlePause}>Pause</button>
-              </div>
-              <div style={{ display: 'flex', gap: '5px', marginBottom: '20px' }}>
-                <button onClick={handleStep}>Step 1</button>
-                <button onClick={handleStep10}>Step 10</button>
-              </div>
+            <div style={{ width: '400px' }}>
+              {mode === 'challenges' ? (
+                <ChallengePanel
+                  controller={controller}
+                  onChallengeStart={handleChallengeStart}
+                />
+              ) : (
+                <>
+                  <h3>Frame Control</h3>
+                  <div style={{ display: 'flex', gap: '5px', marginBottom: '10px' }}>
+                    <button onClick={handlePlay}>Play</button>
+                    <button onClick={handlePause}>Pause</button>
+                  </div>
+                  <div style={{ display: 'flex', gap: '5px', marginBottom: '20px' }}>
+                    <button onClick={handleStep}>Step 1</button>
+                    <button onClick={handleStep10}>Step 10</button>
+                  </div>
 
-              <h3>Input</h3>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px' }}>
-                {BUTTONS.map((button) => (
-                  <button
-                    key={button}
-                    onMouseDown={() => handleButtonPress(button)}
-                    onMouseUp={() => handleButtonRelease(button)}
-                    onMouseLeave={() => handleButtonRelease(button)}
-                    style={{
-                      padding: '8px',
-                      fontSize: '12px',
-                      textTransform: 'uppercase',
-                    }}
-                  >
-                    {button}
-                  </button>
-                ))}
-              </div>
+                  <h3>Input</h3>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '5px' }}>
+                    {BUTTONS.map((button) => (
+                      <button
+                        key={button}
+                        onMouseDown={() => handleButtonPress(button)}
+                        onMouseUp={() => handleButtonRelease(button)}
+                        onMouseLeave={() => handleButtonRelease(button)}
+                        style={{
+                          padding: '8px',
+                          fontSize: '12px',
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {button}
+                      </button>
+                    ))}
+                  </div>
 
-              <h3 style={{ marginTop: '20px' }}>Debug</h3>
-              <p style={{ fontSize: '12px', color: '#666' }}>
-                Open browser console.<br />
-                <code>window.game</code> gives you access to the GameController.
-              </p>
-              <pre style={{ fontSize: '10px', background: '#f0f0f0', padding: '5px' }}>
+                  <h3 style={{ marginTop: '20px' }}>Debug</h3>
+                  <p style={{ fontSize: '12px', color: '#666' }}>
+                    Open browser console.<br />
+                    <code>window.game</code> gives you access to the GameController.
+                  </p>
+                  <pre style={{ fontSize: '10px', background: '#f0f0f0', padding: '5px' }}>
 {`// Try in console:
 game.press('right');
 await game.step();
 game.release('right');
 game.frameNumber`}
-              </pre>
+                  </pre>
+                </>
+              )}
             </div>
           </div>
         </>

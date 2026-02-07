@@ -1,4 +1,6 @@
 import { EmulatorBridge } from './EmulatorBridge';
+import { MemoryReader, GameState } from './MemoryReader';
+import { GameId } from '../data/types';
 
 /**
  * Button names for game input.
@@ -106,10 +108,12 @@ export class GameController {
   private playerIndex: number;
   private heldButtons: Set<Button> = new Set();
   private ramOffset: number = 0;
+  private memoryReader: MemoryReader;
 
   constructor(bridge: EmulatorBridge, playerIndex: number = 0) {
     this.bridge = bridge;
     this.playerIndex = playerIndex;
+    this.memoryReader = new MemoryReader(bridge);
   }
 
   /**
@@ -302,6 +306,106 @@ export class GameController {
    */
   readBytes(address: number, length: number): Uint8Array {
     return this.bridge.readMemoryBytes(this.ramOffset + address, length);
+  }
+
+  // ==================== Stable Retro Integration ====================
+
+  /**
+   * Load game data (variable mappings) for a specific game.
+   * This enables getVariable() and getState() methods.
+   *
+   * @param gameId - Game identifier like "SonicTheHedgehog2-Genesis"
+   *
+   * @example
+   * controller.loadGameData('SonicTheHedgehog2-Genesis');
+   * const xPos = controller.getVariable('x');
+   */
+  loadGameData(gameId: GameId): void {
+    this.memoryReader.loadGame(gameId);
+  }
+
+  /**
+   * Discover the work RAM base address and configure memory reads.
+   *
+   * For Genesis games, the emulator allocates work RAM dynamically in WASM heap.
+   * This method uses the cheat system to locate the RAM, then configures the
+   * memory offset so that data.json addresses map to correct HEAPU8 locations.
+   *
+   * Must be called after the game is running (not just loaded).
+   *
+   * @param consoleType - Console type for base address calculation (default: 'genesis')
+   * @returns The discovered base address
+   */
+  async discoverMemory(consoleType: string = 'genesis'): Promise<number> {
+    const base = await this.bridge.discoverWorkRamBase();
+    const consoleRamBase = CONSOLE_RAM_OFFSETS[consoleType] ?? 0;
+    // data.json addresses = consoleRamBase + relative_offset
+    // HEAPU8 address = base + relative_offset
+    // So: HEAPU8 addr = data.json addr + (base - consoleRamBase)
+    const offset = base - consoleRamBase;
+    this.memoryReader.setMemoryOffset(offset);
+    console.log(`[GameController] Memory discovered: base=0x${base.toString(16)}, offset=${offset}`);
+    return base;
+  }
+
+  /**
+   * Read a named variable from game memory using Stable Retro mappings.
+   * Requires loadGameData() to be called first.
+   *
+   * @param name - Variable name from data.json (e.g., "x", "rings", "lives")
+   * @returns The current value of the variable
+   * @throws If game data is not loaded or variable is not found
+   *
+   * @example
+   * controller.loadGameData('SonicTheHedgehog2-Genesis');
+   * const xPos = controller.getVariable('x');
+   * const rings = controller.getVariable('rings');
+   */
+  getVariable(name: string): number {
+    return this.memoryReader.getVariable(name);
+  }
+
+  /**
+   * Read all named variables from game memory.
+   * Requires loadGameData() to be called first.
+   *
+   * @returns Object with all variable names and their current values
+   *
+   * @example
+   * controller.loadGameData('SonicTheHedgehog2-Genesis');
+   * const state = controller.getState();
+   * console.log(state.x, state.rings, state.lives);
+   */
+  getState(): GameState {
+    return this.memoryReader.getState();
+  }
+
+  /**
+   * Get available variable names for the loaded game.
+   */
+  getVariableNames(): string[] {
+    return this.memoryReader.getVariableNames();
+  }
+
+  /**
+   * Check if a variable exists in the loaded game data.
+   */
+  hasVariable(name: string): boolean {
+    return this.memoryReader.hasVariable(name);
+  }
+
+  /**
+   * Check if game data is loaded.
+   */
+  get hasGameData(): boolean {
+    return this.memoryReader.isLoaded;
+  }
+
+  /**
+   * Get the MemoryReader for advanced access.
+   */
+  getMemoryReader(): MemoryReader {
+    return this.memoryReader;
   }
 
   // ==================== State Management ====================

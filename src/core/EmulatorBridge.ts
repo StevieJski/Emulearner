@@ -206,24 +206,40 @@ export class EmulatorBridge {
       throw new Error('Emulator not ready');
     }
 
-    return new Promise<number>((resolve) => {
+    return new Promise<number>((resolve, reject) => {
       const gm = this.gameManager!;
       const startFrame = gm.getFrameNum();
+      let attempts = 0;
+      const maxAttempts = 500; // Timeout after ~8 seconds
+
+      // Debug: console.log('stepFrame starting:', startFrame);
 
       const checkFrame = () => {
+        attempts++;
+        if (attempts > maxAttempts) {
+          console.error('stepFrame timeout after', attempts, 'attempts');
+          gm.toggleMainLoop(0);
+          this._state = 'paused';
+          reject(new Error('stepFrame timeout - frame did not advance'));
+          return;
+        }
+
         const currentFrame = gm.getFrameNum();
         if (currentFrame > startFrame) {
           gm.toggleMainLoop(0); // Pause
           this._state = 'paused';
           resolve(currentFrame);
         } else {
-          requestAnimationFrame(checkFrame);
+          // Use setTimeout instead of requestAnimationFrame for better compatibility
+          // with worker message handler contexts
+          setTimeout(checkFrame, 1);
         }
       };
 
       gm.toggleMainLoop(1); // Resume loop
       this._state = 'running';
-      requestAnimationFrame(checkFrame);
+      // Give the emulator time to run before checking
+      setTimeout(checkFrame, 20);
     });
   }
 
@@ -250,13 +266,16 @@ export class EmulatorBridge {
           this._state = 'paused';
           resolve(currentFrame);
         } else {
-          requestAnimationFrame(checkFrame);
+          // Use setTimeout instead of requestAnimationFrame for better compatibility
+          // with worker message handler contexts
+          setTimeout(checkFrame, 1);
         }
       };
 
       gm.toggleMainLoop(1); // Resume loop
       this._state = 'running';
-      requestAnimationFrame(checkFrame);
+      // Give the emulator time to run before checking
+      setTimeout(checkFrame, 20);
     });
   }
 
@@ -280,6 +299,7 @@ export class EmulatorBridge {
     if (!this.gameManager) {
       throw new Error('Emulator not ready');
     }
+    console.log('[EmulatorBridge] simulateInput:', { player, buttonIndex, pressed });
     this.gameManager.simulateInput(player, buttonIndex, pressed ? 1 : 0);
   }
 
@@ -394,6 +414,121 @@ export class EmulatorBridge {
       throw new Error('Emulator not ready');
     }
     return this.gameManager.getCoreOptions();
+  }
+
+  // ==================== Cheat System ====================
+
+  /**
+   * Set a cheat code via the RetroArch cheat system.
+   * @param index - Cheat slot index
+   * @param enabled - Whether the cheat is active
+   * @param code - Cheat code string (e.g., "FFFE12:AB" for Genesis Action Replay format)
+   */
+  setCheat(index: number, enabled: boolean, code: string): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.setCheat(index, enabled ? 1 : 0, code);
+  }
+
+  /**
+   * Reset (clear) all active cheats.
+   */
+  resetCheat(): void {
+    if (!this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+    this.gameManager.resetCheat();
+  }
+
+  // ==================== RAM Base Discovery ====================
+
+  /**
+   * Discover the Genesis work RAM base address in HEAPU8.
+   *
+   * The genesis_plus_gx core allocates work RAM dynamically within the
+   * Emscripten heap. This method uses the cheat system to write marker
+   * values to known addresses, then scans HEAPU8 to find them.
+   *
+   * @returns The HEAPU8 base address of the 64KB Genesis work RAM
+   * @throws If discovery fails
+   */
+  async discoverWorkRamBase(): Promise<number> {
+    if (!this.module || !this.gameManager) {
+      throw new Error('Emulator not ready');
+    }
+
+    const heap = this.module.HEAPU8;
+    // Use two distinct marker values unlikely to occur naturally
+    const MARKER1 = 0xA7;
+    const MARKER2 = 0x53;
+    // Lives address in Genesis 68000 address space (Action Replay format)
+    const LIVES_ADDR = 'FFFE12';
+    // Relative offset of lives within 64KB work RAM (0xFF0000-based)
+    const LIVES_OFFSET = 0xFE12;
+    // Default lives value to restore after discovery
+    const DEFAULT_LIVES = 3;
+
+    // Phase 1: Write first marker via cheat system and step one frame
+    this.gameManager.resetCheat();
+    this.gameManager.setCheat(0, 1, `${LIVES_ADDR}:${MARKER1.toString(16).toUpperCase()}`);
+    await this.stepFrame();
+
+    // Record all HEAPU8 positions that contain MARKER1
+    // Filter to only plausible base addresses (enough room for 64KB work RAM)
+    const marker1Positions: number[] = [];
+    for (let i = 0; i < heap.length; i++) {
+      if (heap[i] === MARKER1) {
+        const possibleBase = i - LIVES_OFFSET;
+        if (possibleBase >= 0 && possibleBase + 0xFFFF < heap.length) {
+          marker1Positions.push(i);
+        }
+      }
+    }
+    console.log(`[EmulatorBridge] Phase 1: Found ${marker1Positions.length} MARKER1 candidates`);
+
+    // Phase 2: Write second marker and step again
+    this.gameManager.resetCheat();
+    this.gameManager.setCheat(0, 1, `${LIVES_ADDR}:${MARKER2.toString(16).toUpperCase()}`);
+    await this.stepFrame();
+
+    // Find positions that changed from MARKER1 to MARKER2
+    // This eliminates coincidental matches, leaving only the real lives address
+    const matches: number[] = [];
+    for (const pos of marker1Positions) {
+      if (heap[pos] === MARKER2) {
+        matches.push(pos);
+      }
+    }
+    console.log(`[EmulatorBridge] Phase 2: ${matches.length} positions changed MARKER1→MARKER2`);
+
+    // Clear cheats so markers stop being applied
+    this.gameManager.resetCheat();
+    await this.stepFrame();
+
+    if (matches.length === 0) {
+      throw new Error('Failed to discover work RAM base: no matching positions found');
+    }
+
+    // Find the best candidate by checking for plausible game state
+    let discoveredBase: number | null = null;
+    for (const livesAddr of matches) {
+      const base = livesAddr - LIVES_OFFSET;
+      const zone = heap[base + 0xFE10];
+      if (zone <= 20) {
+        discoveredBase = base;
+        break;
+      }
+    }
+    if (discoveredBase === null) {
+      discoveredBase = matches[0] - LIVES_OFFSET;
+    }
+
+    // Restore the lives byte that was corrupted by the markers
+    heap[discoveredBase + LIVES_OFFSET] = DEFAULT_LIVES;
+    console.log(`[EmulatorBridge] Discovered work RAM base: 0x${discoveredBase.toString(16)} (${discoveredBase}), lives restored to ${DEFAULT_LIVES}`);
+
+    return discoveredBase;
   }
 
   /**
