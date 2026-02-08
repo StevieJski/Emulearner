@@ -305,12 +305,43 @@ export class EmulatorBridge {
 
   /**
    * Get a save state snapshot.
+   *
+   * Uses Module.EmulatorJSGetState() if available (nightly cores),
+   * otherwise falls back to calling _save_state_info directly
+   * (available in all core builds including stable).
    */
   saveState(): Uint8Array {
     if (!this.gameManager) {
       throw new Error('Emulator not ready');
     }
-    return this.gameManager.getState();
+
+    const mod = this.module;
+    if (!mod) {
+      throw new Error('Module not available');
+    }
+
+    // Try the native function first (nightly cores)
+    if (typeof mod.EmulatorJSGetState === 'function') {
+      return mod.EmulatorJSGetState();
+    }
+
+    // Polyfill using _save_state_info (available in all core builds).
+    // This C function serializes the current state and returns a string:
+    // "size|pointer|success" where success=1 means OK.
+    const saveStateInfo = mod.cwrap('save_state_info', 'string', []);
+    const info = saveStateInfo() as string;
+    const parts = info.split('|');
+
+    if (parts[2] !== '1') {
+      throw new Error(`Save state failed: ${parts[0]}`);
+    }
+
+    const size = parseInt(parts[0], 10);
+    const dataStart = parseInt(parts[1], 10);
+    const data = mod.HEAPU8.subarray(dataStart, dataStart + size);
+
+    // Return a copy (the WASM buffer may be reused)
+    return new Uint8Array(data);
   }
 
   /**

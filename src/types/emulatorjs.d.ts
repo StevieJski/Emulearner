@@ -80,7 +80,7 @@ export interface EmscriptenModule {
   ccall: (name: string, returnType: string, argTypes: string[], args: unknown[]) => unknown;
   postMainLoop?: () => void;
   preMainLoop?: () => void;
-  EmulatorJSGetState: () => Uint8Array;
+  EmulatorJSGetState?: () => Uint8Array;
   callbacks: {
     setupCoreSettingFile?: (filePath: string) => void;
   };
