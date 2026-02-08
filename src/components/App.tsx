@@ -29,11 +29,17 @@ export function App() {
     controllerRef.current = newController;
     setController(newController); // This triggers re-render for ChallengePanel
     newController.setRamOffset('genesis');
+
+    // Airstriker is an unlicensed homebrew - disable address error checking
+    if (gameUrl.toLowerCase().includes('airstriker')) {
+      newController.getBridge().setVariable('genesis_plus_gx_addr_error', 'disabled');
+    }
+
     console.log('Emulator ready! GameController available.');
 
     // Expose controller globally for debugging
     (window as unknown as { game: GameController }).game = newController;
-  }, []);
+  }, [gameUrl]);
 
   const handleStateChange = useCallback((newState: EmulatorState) => {
     setState(newState);
@@ -222,6 +228,7 @@ export function App() {
               {mode === 'challenges' ? (
                 <ChallengePanel
                   controller={controller}
+                  gameUrl={gameUrl}
                   onChallengeStart={handleChallengeStart}
                 />
               ) : (

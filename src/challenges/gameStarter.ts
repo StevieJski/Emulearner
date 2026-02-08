@@ -185,6 +185,105 @@ export async function startSonic2(
 }
 
 /**
+ * Check if Airstriker is in active gameplay by reading lives from RAM.
+ * During menus, the lives address reads 0. During gameplay, it reads >= 1.
+ */
+export function isAirstrikerInGameplay(controller: GameController, _debug = false): boolean {
+  if (!controller.isReady) return false;
+
+  try {
+    const lives = controller.getVariable('lives');
+    if (_debug) {
+      console.log(`[gameStarter] Airstriker lives=${lives}`);
+    }
+    return lives >= 1 && lives <= 10;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Automated start sequence for Airstriker
+ *
+ * Menu flow: Title(Start) → Main Menu(B) → Game Menu(B) → Gameplay
+ * Note: Button B also fires, so the ship shoots during menu transitions.
+ */
+export async function startAirstriker(
+  controller: GameController,
+  onProgress?: (message: string) => void
+): Promise<StartResult> {
+  try {
+    // Step 1: Load game data and discover memory
+    onProgress?.('Discovering memory layout...');
+    controller.loadGameData('Airstriker-Genesis');
+
+    // Set core option for unlicensed game
+    controller.getBridge().setVariable('genesis_plus_gx_addr_error', 'disabled');
+
+    try {
+      await controller.discoverMemory('genesis');
+    } catch (e) {
+      return { success: false, message: `Memory discovery failed: ${e}` };
+    }
+
+    // Step 2: Check if already in gameplay
+    if (isAirstrikerInGameplay(controller)) {
+      onProgress?.('Game already running!');
+      return { success: true, message: 'Game already in gameplay.' };
+    }
+
+    // Step 3: Wait for title screen to be ready
+    onProgress?.('Waiting for title screen...');
+    await controller.stepFrames(300);
+
+    // Step 4: Press Start on title screen
+    onProgress?.('Pressing Start on title...');
+    await controller.tap('start');
+    await controller.stepFrames(120);
+
+    // Step 5: Press B to select "Start game" on Main Menu
+    onProgress?.('Selecting Start Game...');
+    await controller.tap('b');
+    await controller.stepFrames(120);
+
+    // Step 6: Press B to select "Single Player" on Game Menu
+    onProgress?.('Selecting Single Player...');
+    await controller.tap('b');
+    await controller.stepFrames(180);
+
+    // Step 7: Verify gameplay
+    if (isAirstrikerInGameplay(controller)) {
+      onProgress?.('Game started!');
+      return { success: true, message: 'Game started! You can now run challenges.' };
+    }
+
+    // Retry once more in case timing was off
+    onProgress?.('Retrying...');
+    await controller.tap('start');
+    await controller.stepFrames(120);
+    await controller.tap('b');
+    await controller.stepFrames(120);
+    await controller.tap('b');
+    await controller.stepFrames(240);
+
+    if (isAirstrikerInGameplay(controller)) {
+      onProgress?.('Game started!');
+      return { success: true, message: 'Game started!' };
+    }
+
+    return {
+      success: false,
+      message: 'Could not reach gameplay.',
+    };
+  } catch (error) {
+    return {
+      success: false,
+      message: `Error during auto-start: ${error}`,
+    };
+  }
+}
+
+/**
  * Start a game automatically based on game ID
  */
 export async function startGame(
@@ -195,6 +294,8 @@ export async function startGame(
   switch (gameId) {
     case 'SonicTheHedgehog2-Genesis':
       return startSonic2(controller, onProgress);
+    case 'Airstriker-Genesis':
+      return startAirstriker(controller, onProgress);
     default:
       return {
         success: false,
@@ -214,6 +315,8 @@ export function isGameReady(
   switch (gameId) {
     case 'SonicTheHedgehog2-Genesis':
       return isSonic2InGameplay(controller, debug);
+    case 'Airstriker-Genesis':
+      return isAirstrikerInGameplay(controller, debug);
     default:
       return true; // Assume ready for unknown games
   }

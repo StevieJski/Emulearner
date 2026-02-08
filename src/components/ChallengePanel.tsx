@@ -27,11 +27,30 @@ registerSonicChallenges();
 
 interface ChallengePanelProps {
   controller: GameController | null;
+  gameUrl?: string;
   onChallengeStart?: () => void;
+}
+
+/**
+ * Check if the loaded ROM URL likely matches a challenge's game ID.
+ * This prevents auto-start from running Sonic 2 discovery on unrelated ROMs.
+ */
+function romMatchesGame(gameUrl: string | undefined, gameId: string): boolean {
+  if (!gameUrl) return false;
+  const url = gameUrl.toLowerCase();
+  switch (gameId) {
+    case 'SonicTheHedgehog2-Genesis':
+      return url.includes('sonic');
+    case 'Airstriker-Genesis':
+      return url.includes('airstriker');
+    default:
+      return false;
+  }
 }
 
 export function ChallengePanel({
   controller,
+  gameUrl,
   onChallengeStart,
 }: ChallengePanelProps) {
   const [challenges, setChallenges] = useState<ChallengeMeta[]>([]);
@@ -76,8 +95,15 @@ export function ChallengePanel({
   }, [selectedId]);
 
   // Check game readiness periodically (stops polling once ready)
+  // Only polls if the loaded ROM matches the challenge game
   useEffect(() => {
     if (!controller || !currentChallenge) {
+      setGameReady(false);
+      return;
+    }
+
+    // Don't load game data or poll if the ROM doesn't match
+    if (!romMatchesGame(gameUrl, currentChallenge.game)) {
       setGameReady(false);
       return;
     }
@@ -110,7 +136,7 @@ export function ChallengePanel({
       }
     }, 2000);
     return () => clearInterval(interval);
-  }, [controller, currentChallenge]);
+  }, [controller, currentChallenge, gameUrl]);
 
   // Load selected challenge
   useEffect(() => {
@@ -166,17 +192,19 @@ export function ChallengePanel({
   }, [controller, currentChallenge]);
 
   // Auto-start: trigger game start when controller + challenge are available
+  // Only auto-starts if the loaded ROM matches the challenge's game
   useEffect(() => {
     if (!controller || !currentChallenge || gameReady || startingGame) return;
     if (autoStartAttempted.current) return;
     if (!controller.isReady) return;
+    if (!romMatchesGame(gameUrl, currentChallenge.game)) return;
 
     autoStartAttempted.current = true;
     const timer = setTimeout(() => {
       handleStartGame();
     }, 500);
     return () => clearTimeout(timer);
-  }, [controller, currentChallenge, gameReady, startingGame, handleStartGame]);
+  }, [controller, currentChallenge, gameReady, startingGame, handleStartGame, gameUrl]);
 
   const handleRun = useCallback(async () => {
     if (!engine || !currentChallenge || !controller) {

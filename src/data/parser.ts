@@ -17,12 +17,14 @@ import {
 // Import game data files
 // These are statically imported to work with bundlers
 import sonicData from './games/SonicTheHedgehog2-Genesis/data.json';
+import airstrikerData from './games/Airstriker-Genesis/data.json';
 
 /**
  * Registry of available game data
  */
 const GAME_DATA_REGISTRY: Record<GameId, DataJson> = {
   'SonicTheHedgehog2-Genesis': sonicData as DataJson,
+  'Airstriker-Genesis': airstrikerData as DataJson,
 };
 
 /**
